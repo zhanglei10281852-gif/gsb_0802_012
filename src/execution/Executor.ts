@@ -290,7 +290,6 @@ export class Executor<
     const externalAbortSignal = this.validatedExecutionArgs.externalAbortSignal;
     let removeExternalAbortListener: (() => void) | undefined;
     if (externalAbortSignal) {
-      externalAbortSignal.throwIfAborted();
       const onExternalAbort = () => {
         this.abort(externalAbortSignal.reason);
       };
@@ -302,6 +301,16 @@ export class Executor<
     const maybeRemoveExternalAbortListener = () => {
       removeExternalAbortListener?.();
     };
+
+    if (externalAbortSignal?.aborted) {
+      maybeRemoveExternalAbortListener();
+      this.aborted = true;
+      this.abortReason = externalAbortSignal.reason;
+      this.getFinishSharedExecution()();
+      return Promise.reject(
+        this.createAbortedExecutionError(Promise.resolve({ data: null })),
+      );
+    }
 
     let result: PromiseOrValue<ObjMap<unknown>>;
     try {

@@ -54,6 +54,9 @@ describe('Integration Tests', () => {
   testOnNodeProject('diagnostics-deno-with-deno-build');
   testOnNodeProject('diagnostics-deno-with-node-build');
 
+  // Cancellation and diagnostics lifecycle tests
+  testOnNodeProject('cancellation-node');
+
   // Conditional export tests
   testOnNodeProject('conditions');
 

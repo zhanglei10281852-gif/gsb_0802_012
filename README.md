@@ -137,6 +137,41 @@ in files with the `.js` extension and the ESModule build within `.mjs` files.
 
 We actively welcome pull requests. Learn how to [contribute](./.github/CONTRIBUTING.md).
 
+### Running the pre-release regression checks
+
+The client-disconnect cancellation feature (`execute`, `subscribe`, and
+incremental execution driven by a caller-supplied `AbortSignal`) is guarded by
+a two-layer regression set that you can run before publishing:
+
+- **Unit layer** — imports the runtime from source and asserts the
+  `graphql:execute` / `graphql:subscribe` diagnostics lifecycle across normal
+  completion, user cancellation, and resolver failure. It also checks the
+  cancellation contracts (`abortSignal-test.ts`). Run it with:
+
+  ```sh
+  npm run testonly
+  ```
+
+- **Process-level layer** — spawns a separate Node process that imports
+  GraphQL.js from the built `npmDist` ESM entry and subscribes to the real
+  `node:diagnostics_channel`, verifying the feature survives the build/publish
+  pipeline. This layer builds `npmDist` on demand, but you can also produce the
+  artifact explicitly:
+
+  ```sh
+  npm run build:npm
+  npm run testonly
+  ```
+
+Type-check the whole tree (including the test layers) with:
+
+```sh
+npm run check:ts
+```
+
+These commands are safe to run repeatedly and in any order; the process-level
+test rebuilds `npmDist` if the ESM entry is missing.
+
 This repository is managed by EasyCLA. Project participants must sign the free [GraphQL Specification Membership agreement](https://preview-spec-membership.graphql.org) before making a contribution. You only need to do this one time, and it can be signed by [individual contributors](http://individual-spec-membership.graphql.org/) or their [employers](http://corporate-spec-membership.graphql.org/).
 
 To initiate the signature process please open a PR against this repo. The EasyCLA bot will block the merge if we still need a membership agreement from you.

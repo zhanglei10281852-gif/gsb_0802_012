@@ -4,13 +4,17 @@ import { assert, expect } from 'chai';
 
 import { expectJSON } from '../../__testUtils__/expectJSON.ts';
 import { expectPromise } from '../../__testUtils__/expectPromise.ts';
+import type { MethodSpy } from '../../__testUtils__/spyOn.ts';
 import { spyOnMethod } from '../../__testUtils__/spyOn.ts';
 
+import type { PromiseOrValue } from '../../jsutils/PromiseOrValue.ts';
 import { promiseWithResolvers } from '../../jsutils/promiseWithResolvers.ts';
 
 import { GraphQLError } from '../../error/GraphQLError.ts';
 
 import { parse } from '../../language/parser.ts';
+
+import type { GraphQLResolveInfo } from '../../type/definition.ts';
 
 import { buildSchema } from '../../utilities/buildASTSchema.ts';
 
@@ -26,16 +30,24 @@ const schema = buildSchema(`
   type Todo {
     id: ID
     author: User
+    items: [String]
   }
 
   type User {
     id: ID
+    name: String
+    nonNullName: String!
   }
 
   type Query {
     todo: Todo
     nonNullableTodo: Todo!
     scalarList: [String]
+  }
+
+  type Mutation {
+    first: Todo
+    second: Todo
   }
 
   type Subscription {
@@ -544,5 +556,501 @@ describe('incremental execution: cancellation', () => {
       watcher.stop();
     }
     expect(watcher.reason()).to.equal(null);
+  });
+});
+
+const combinedDocument = parse(`mutation {
+  first { id }
+  second {
+    id
+    ... @defer {
+      author { name }
+    }
+    items @stream(initialCount: 0)
+  }
+}`);
+
+const combinedNonNullDocument = parse(`mutation {
+  first { id }
+  second {
+    id
+    ... @defer {
+      author { name nonNullName }
+    }
+    items @stream(initialCount: 0)
+  }
+}`);
+
+interface Controlled<T> {
+  promise: Promise<T>;
+  resolve: (value: PromiseOrValue<T>) => void;
+  reject: (reason?: unknown) => void;
+}
+
+interface ControllableAsyncIterator extends AsyncIterable<unknown> {
+  next: () => Promise<IteratorResult<unknown>>;
+  return: () => Promise<IteratorResult<unknown>>;
+}
+
+interface CombinedFixture {
+  /** Resolver invocations in the order they started. */
+  calls: Array<string>;
+  /** Resolver abort-signal cleanup callbacks in firing order. */
+  cleanups: Array<string>;
+  /** Abort signal observed by each started resolver. */
+  signals: {
+    first: AbortSignal | undefined;
+    second: AbortSignal | undefined;
+    author: AbortSignal | undefined;
+    items: AbortSignal | undefined;
+  };
+  first: Controlled<{ id: string }>;
+  second: Controlled<undefined>;
+  author: Controlled<{ name: string; nonNullName?: unknown }>;
+  authorStarted: Promise<void>;
+  itemsStarted: Promise<void>;
+  /** Source iterator requested by the streamed `items` field. */
+  streamSource: ControllableAsyncIterator;
+  streamReturnSpy: MethodSpy;
+  /** Item pulls issued by the stream, in request order. */
+  pulls: Array<Controlled<IteratorResult<unknown>>>;
+  /** Waits for the next not-yet-observed item pull from the stream. */
+  nextPull: () => Promise<Controlled<IteratorResult<unknown>>>;
+  rootValue: {
+    first: (
+      args: unknown,
+      contextValue: unknown,
+      info: GraphQLResolveInfo,
+    ) => Promise<{ id: string }>;
+    second: (
+      args: unknown,
+      contextValue: unknown,
+      info: GraphQLResolveInfo,
+    ) => Promise<{
+      id: string;
+      author: (
+        args: unknown,
+        contextValue: unknown,
+        info: GraphQLResolveInfo,
+      ) => Promise<{ name: string; nonNullName?: unknown }>;
+      items: (
+        args: unknown,
+        contextValue: unknown,
+        info: GraphQLResolveInfo,
+      ) => ControllableAsyncIterator;
+    }>;
+  };
+}
+
+/**
+ * Builds a root value driving one combined operation: two serial mutation
+ * root fields, the second holding a deferred `author` fragment and a
+ * streamed `items` list. Every resolver start, observed abort signal, and
+ * source item pull is recorded so tests can assert ordering and cleanup
+ * without relying on internal implementation details.
+ */
+function makeCombinedFixture(): CombinedFixture {
+  const calls: Array<string> = [];
+  const cleanups: Array<string> = [];
+  const signals = {
+    first: undefined as AbortSignal | undefined,
+    second: undefined as AbortSignal | undefined,
+    author: undefined as AbortSignal | undefined,
+    items: undefined as AbortSignal | undefined,
+  };
+  const first = promiseWithResolvers<{ id: string }>();
+  const second = promiseWithResolvers<undefined>();
+  const author = promiseWithResolvers<{
+    name: string;
+    nonNullName?: unknown;
+  }>();
+  const authorStarted =
+    // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+    promiseWithResolvers<void>();
+  const itemsStarted =
+    // eslint-disable-next-line @typescript-eslint/no-invalid-void-type
+    promiseWithResolvers<void>();
+
+  const pulls: Array<Controlled<IteratorResult<unknown>>> = [];
+  const pullWaiters: Array<
+    (pull: Controlled<IteratorResult<unknown>>) => void
+  > = [];
+  let awaitedPulls = 0;
+
+  const streamSource: ControllableAsyncIterator = {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    next(): Promise<IteratorResult<unknown>> {
+      const pull = promiseWithResolvers<IteratorResult<unknown>>();
+      pulls.push(pull);
+      const waiter = pullWaiters.shift();
+      if (waiter !== undefined) {
+        waiter(pull);
+      }
+      return pull.promise;
+    },
+    return(): Promise<IteratorResult<unknown>> {
+      return Promise.resolve({ value: undefined, done: true });
+    },
+  };
+  const streamReturnSpy = spyOnMethod(streamSource, 'return');
+
+  function nextPull(): Promise<Controlled<IteratorResult<unknown>>> {
+    const pull = pulls[awaitedPulls++];
+    if (pull !== undefined) {
+      return Promise.resolve(pull);
+    }
+    return new Promise((resolve) => {
+      pullWaiters.push(resolve);
+    });
+  }
+
+  function track(
+    name: 'first' | 'second' | 'author' | 'items',
+    info: GraphQLResolveInfo,
+  ): void {
+    calls.push(name);
+    const signal = info.getAbortSignal();
+    signals[name] = signal;
+    signal?.addEventListener('abort', () => {
+      cleanups.push(name);
+    });
+  }
+
+  const rootValue = {
+    first: (
+      _args: unknown,
+      _contextValue: unknown,
+      info: GraphQLResolveInfo,
+    ) => {
+      track('first', info);
+      return first.promise;
+    },
+    second: (
+      _args: unknown,
+      _contextValue: unknown,
+      info: GraphQLResolveInfo,
+    ) => {
+      track('second', info);
+      return second.promise.then(() => ({
+        id: 'second-id',
+        author: (
+          _authorArgs: unknown,
+          _authorContext: unknown,
+          authorInfo: GraphQLResolveInfo,
+        ) => {
+          track('author', authorInfo);
+          authorStarted.resolve();
+          return author.promise;
+        },
+        items: (
+          _itemArgs: unknown,
+          _itemContext: unknown,
+          itemsInfo: GraphQLResolveInfo,
+        ) => {
+          track('items', itemsInfo);
+          itemsStarted.resolve();
+          return streamSource;
+        },
+      }));
+    },
+  };
+
+  return {
+    calls,
+    cleanups,
+    signals,
+    first,
+    second,
+    author,
+    authorStarted: authorStarted.promise,
+    itemsStarted: itemsStarted.promise,
+    streamSource,
+    streamReturnSpy,
+    pulls,
+    nextPull,
+    rootValue,
+  };
+}
+
+describe('combined mutation operation: cancellation', () => {
+  it('stops before the initial payload while a serial root field is pending', async () => {
+    const fixture = makeCombinedFixture();
+    const abortController = new AbortController();
+    const reason = new Error('client disconnected');
+
+    const resultPromise = experimentalExecuteIncrementally({
+      schema,
+      document: combinedDocument,
+      rootValue: fixture.rootValue,
+      abortSignal: abortController.signal,
+      enableEarlyExecution: true,
+    });
+
+    // Serial root fields start one at a time: only the first is running.
+    expect(fixture.calls).to.deep.equal(['first']);
+
+    abortController.abort(reason);
+
+    const error = (await expectPromise(
+      resultPromise,
+    ).toReject()) as AbortedGraphQLExecutionError<ExecutionResult>;
+    expect(error).to.be.instanceOf(AbortedGraphQLExecutionError);
+    expect(error.cause).to.equal(reason);
+
+    // Late settlement of the pending root field completes the partial
+    // result; the second serial field and all incremental work never start.
+    fixture.first.resolve({ id: 'first-id' });
+    expectJSON(await error.abortedResult).toDeepEqual({
+      data: null,
+      errors: [
+        {
+          message: 'Aborted!',
+          locations: [{ line: 2, column: 3 }],
+          path: ['first'],
+        },
+        { message: 'Aborted!' },
+      ],
+    });
+
+    await drainEventLoop();
+    expect(fixture.calls).to.deep.equal(['first']);
+    expect(fixture.cleanups).to.deep.equal(['first']);
+    expect(fixture.signals.first?.aborted).to.equal(true);
+    expect(fixture.streamReturnSpy.callCount).to.equal(0);
+  });
+
+  it('aborts after the initial payload while deferred and streamed work is pending', async () => {
+    const watcher = watchForUnhandledRejection();
+    try {
+      const fixture = makeCombinedFixture();
+      const abortController = new AbortController();
+      const reason = new Error('client disconnected');
+
+      const resultPromise = experimentalExecuteIncrementally({
+        schema,
+        document: combinedDocument,
+        rootValue: fixture.rootValue,
+        abortSignal: abortController.signal,
+        enableEarlyExecution: true,
+      });
+      fixture.first.resolve({ id: 'first-id' });
+      fixture.second.resolve(undefined);
+      const result = await resultPromise;
+      assert('initialResult' in result);
+
+      // The client has seen the initial payload with both incremental
+      // deliveries still pending.
+      expectJSON(result.initialResult).toDeepEqual({
+        data: {
+          first: { id: 'first-id' },
+          second: { id: 'second-id', items: [] },
+        },
+        pending: [
+          { id: '0', path: ['second'] },
+          { id: '1', path: ['second', 'items'] },
+        ],
+        hasNext: true,
+      });
+      await fixture.authorStarted;
+      expect(fixture.calls).to.deep.equal([
+        'first',
+        'second',
+        'items',
+        'author',
+      ]);
+
+      const iterator = result.subsequentResults[Symbol.asyncIterator]();
+      const nextPromise = iterator.next();
+      const pull = await fixture.nextPull();
+      abortController.abort(reason);
+
+      const error = await expectPromise(nextPromise).toReject();
+      expect(error).to.equal(reason);
+
+      // Late settlement of deferred and streamed work is ignored.
+      fixture.author.resolve({ name: 'Ada' });
+      pull.resolve({ value: 'late', done: false });
+      await drainEventLoop();
+
+      expect(await iterator.next()).to.deep.equal({
+        value: undefined,
+        done: true,
+      });
+      expect(fixture.streamReturnSpy.callCount).to.equal(1);
+      expect(fixture.cleanups).to.deep.equal([
+        'first',
+        'second',
+        'items',
+        'author',
+      ]);
+      expect(fixture.signals.author?.aborted).to.equal(true);
+      expect(fixture.signals.items?.aborted).to.equal(true);
+    } finally {
+      watcher.stop();
+    }
+    expect(watcher.reason()).to.equal(null);
+  });
+
+  it('discards a queued deferred patch when aborted before its delivery', async () => {
+    const fixture = makeCombinedFixture();
+    const abortController = new AbortController();
+    const reason = new Error('client disconnected');
+
+    const resultPromise = experimentalExecuteIncrementally({
+      schema,
+      document: combinedDocument,
+      rootValue: fixture.rootValue,
+      abortSignal: abortController.signal,
+      enableEarlyExecution: true,
+    });
+    fixture.first.resolve({ id: 'first-id' });
+    fixture.second.resolve(undefined);
+    const result = await resultPromise;
+    assert('initialResult' in result);
+
+    // The deferred fragment finishes while the consumer is not reading:
+    // its patch queues up behind the pending stream.
+    await fixture.authorStarted;
+    fixture.author.resolve({ name: 'Ada' });
+    await drainEventLoop();
+
+    abortController.abort(reason);
+
+    const iterator = result.subsequentResults[Symbol.asyncIterator]();
+    const error = await expectPromise(iterator.next()).toReject();
+    expect(error).to.equal(reason);
+
+    // Neither the queued patch nor anything else is delivered afterwards.
+    expect(await iterator.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+    fixture.pulls[0]?.resolve({ value: 'late', done: false });
+    await drainEventLoop();
+    expect(fixture.streamReturnSpy.callCount).to.equal(1);
+  });
+
+  it('delivers payloads in resolver completion order until aborted mid-stream', async () => {
+    const watcher = watchForUnhandledRejection();
+    try {
+      const fixture = makeCombinedFixture();
+      const abortController = new AbortController();
+      const reason = new Error('client disconnected');
+
+      const resultPromise = experimentalExecuteIncrementally({
+        schema,
+        document: combinedDocument,
+        rootValue: fixture.rootValue,
+        abortSignal: abortController.signal,
+        enableEarlyExecution: true,
+      });
+      fixture.first.resolve({ id: 'first-id' });
+      fixture.second.resolve(undefined);
+      const result = await resultPromise;
+      assert('initialResult' in result);
+
+      const iterator = result.subsequentResults[Symbol.asyncIterator]();
+      const delivered: Array<unknown> = [];
+
+      // A stream item completes before the deferred fragment, so the
+      // client sees payloads in completion order, not document order.
+      const itemPatchPromise = iterator.next();
+      await fixture.itemsStarted;
+      const firstPull = await fixture.nextPull();
+      firstPull.resolve({ value: 'a', done: false });
+      delivered.push((await itemPatchPromise).value);
+
+      const deferPatchPromise = iterator.next();
+      await fixture.authorStarted;
+      fixture.author.resolve({ name: 'Ada' });
+      delivered.push((await deferPatchPromise).value);
+
+      // Cancel while the next stream item is still pending.
+      const pendingPatchPromise = iterator.next();
+      const secondPull = await fixture.nextPull();
+      abortController.abort(reason);
+
+      const error = await expectPromise(pendingPatchPromise).toReject();
+      expect(error).to.equal(reason);
+
+      // Late items are ignored and the abandoned source closes once.
+      secondPull.resolve({ value: 'b', done: false });
+      await drainEventLoop();
+      expect(await iterator.next()).to.deep.equal({
+        value: undefined,
+        done: true,
+      });
+      expect(fixture.streamReturnSpy.callCount).to.equal(1);
+
+      expectJSON(delivered).toDeepEqual([
+        { hasNext: true, incremental: [{ id: '1', items: ['a'] }] },
+        {
+          hasNext: true,
+          incremental: [{ id: '0', data: { author: { name: 'Ada' } } }],
+          completed: [{ id: '0' }],
+        },
+      ]);
+    } finally {
+      watcher.stop();
+    }
+    expect(watcher.reason()).to.equal(null);
+  });
+
+  it('bubbles a non-null failure inside a deferred patch, then aborts the remaining stream', async () => {
+    const fixture = makeCombinedFixture();
+    const abortController = new AbortController();
+    const reason = new Error('client disconnected');
+
+    const resultPromise = experimentalExecuteIncrementally({
+      schema,
+      document: combinedNonNullDocument,
+      rootValue: fixture.rootValue,
+      abortSignal: abortController.signal,
+      enableEarlyExecution: true,
+    });
+    fixture.first.resolve({ id: 'first-id' });
+    fixture.second.resolve(undefined);
+    const result = await resultPromise;
+    assert('initialResult' in result);
+
+    const iterator = result.subsequentResults[Symbol.asyncIterator]();
+    const patchPromise = iterator.next();
+    await fixture.authorStarted;
+    fixture.author.resolve({
+      name: 'Ada',
+      nonNullName: () => Promise.reject(new Error('name failed')),
+    });
+
+    // The non-null failure bubbles to the nullable `author` boundary inside
+    // the delivered patch; the stream remains pending afterwards.
+    const patch = await patchPromise;
+    expectJSON(patch.value).toDeepEqual({
+      hasNext: true,
+      incremental: [
+        {
+          id: '0',
+          data: { author: null },
+          errors: [
+            {
+              message: 'name failed',
+              locations: [{ line: 6, column: 21 }],
+              path: ['second', 'author', 'nonNullName'],
+            },
+          ],
+        },
+      ],
+      completed: [{ id: '0' }],
+    });
+
+    const pendingPatchPromise = iterator.next();
+    abortController.abort(reason);
+
+    const error = await expectPromise(pendingPatchPromise).toReject();
+    expect(error).to.equal(reason);
+
+    await drainEventLoop();
+    expect(fixture.streamReturnSpy.callCount).to.equal(1);
   });
 });

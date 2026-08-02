@@ -794,3 +794,375 @@ describe('AbortSignal: experimentalExecuteIncrementally()', () => {
     expect(returnCallCount).to.equal(1);
   });
 });
+
+describe('AbortSignal: combined mutation with parallel fields, @defer, and @stream', () => {
+  const combinedSchema = buildSchema(`
+    type ActionResult {
+      sync: String
+      slow: String
+      nonNullSlow: String!
+      items: [String]
+    }
+
+    type Query {
+      noop: String
+    }
+
+    type Mutation {
+      first: ActionResult
+      second: ActionResult
+    }
+  `);
+
+  const combinedDocument = parse(`
+    mutation Combined {
+      first {
+        sync
+        slow
+        ... @defer {
+          nonNullSlow
+        }
+        items @stream(initialCount: 0)
+      }
+      second {
+        sync
+        slow
+      }
+    }
+  `);
+
+  interface CombinedFixture {
+    rootValue: { [key: string]: unknown };
+    stream: ControllableAsyncIterator<string>;
+    firstSlow: {
+      promise: Promise<string>;
+      resolve: (value: string) => void;
+      reject: (reason?: unknown) => void;
+    };
+    firstDeferred: {
+      promise: Promise<string | null>;
+      resolve: (value: string | null) => void;
+      reject: (reason?: unknown) => void;
+    };
+    secondSlow: {
+      promise: Promise<string>;
+      resolve: (value: string) => void;
+      reject: (reason?: unknown) => void;
+    };
+    resolverSignals: Array<AbortSignal>;
+  }
+
+  function createFixture(): CombinedFixture {
+    const stream = createControllableAsyncIterator<string>();
+    const resolverSignals: Array<AbortSignal> = [];
+
+    const firstSlow = promiseWithResolvers<string>();
+    const firstDeferred = promiseWithResolvers<string | null>();
+    const secondSlow = promiseWithResolvers<string>();
+
+    const trackSignal = (info: {
+      getAbortSignal: () => AbortSignal | undefined;
+    }) => {
+      const signal = info.getAbortSignal();
+      if (signal) {
+        resolverSignals.push(signal);
+      }
+    };
+
+    const rootValue = {
+      first: {
+        sync: 'first-sync',
+        slow: (
+          _args: unknown,
+          _ctx: unknown,
+          info: { getAbortSignal: () => AbortSignal | undefined },
+        ) => {
+          trackSignal(info);
+          return firstSlow.promise;
+        },
+        nonNullSlow: (
+          _args: unknown,
+          _ctx: unknown,
+          info: { getAbortSignal: () => AbortSignal | undefined },
+        ) => {
+          trackSignal(info);
+          return firstDeferred.promise;
+        },
+        items: () => stream.iterator,
+      },
+      second: {
+        sync: 'second-sync',
+        slow: (
+          _args: unknown,
+          _ctx: unknown,
+          info: { getAbortSignal: () => AbortSignal | undefined },
+        ) => {
+          trackSignal(info);
+          return secondSlow.promise;
+        },
+      },
+    };
+
+    return {
+      rootValue,
+      stream,
+      firstSlow,
+      firstDeferred,
+      secondSlow,
+      resolverSignals,
+    };
+  }
+
+  function executeCombined(
+    fixture: CombinedFixture,
+    controller: AbortController,
+  ) {
+    return experimentalExecuteIncrementally({
+      schema: combinedSchema,
+      document: combinedDocument,
+      rootValue: fixture.rootValue,
+      abortSignal: controller.signal,
+      enableEarlyExecution: true,
+    });
+  }
+
+  async function resolveInitialPayload(fixture: CombinedFixture): Promise<void> {
+    fixture.firstSlow.resolve('first-slow');
+    await flushMicrotasks();
+    fixture.secondSlow.resolve('second-slow');
+    await flushMicrotasks();
+  }
+
+  it('aborts before the initial payload is delivered', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const captured = await withUnhandledRejectionCapture(async () => {
+      const resultPromise = executeCombined(fixture, controller);
+
+      await flushMicrotasks();
+      controller.abort(abortReason);
+
+      const error = (await expectPromise(
+        resultPromise,
+      ).toReject()) as AbortedGraphQLExecutionError<ExecutionResult>;
+
+      expect(error).to.be.instanceOf(AbortedGraphQLExecutionError);
+      expect(error.cause).to.equal(abortReason);
+
+      fixture.firstSlow.resolve('late-first-slow');
+      fixture.firstDeferred.resolve('late-deferred');
+      fixture.secondSlow.resolve('late-second-slow');
+      fixture.stream.resolveNext({ value: 'late-item', done: false });
+      await flushMicrotasks(5);
+
+      return error;
+    });
+
+    expect(captured.error).to.equal(undefined);
+    expect(captured.unhandled).to.deep.equal([]);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+    for (const signal of fixture.resolverSignals) {
+      expect(signal.aborted).to.equal(true);
+    }
+  });
+
+  it('aborts after the initial payload but before consuming subsequent results', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const resultPromise = executeCombined(fixture, controller);
+    await flushMicrotasks();
+    await resolveInitialPayload(fixture);
+    const result = await resultPromise;
+
+    assert('initialResult' in result);
+    if (!('initialResult' in result)) {
+      return;
+    }
+
+    expect(result.initialResult.data).to.deep.equal({
+      first: { sync: 'first-sync', slow: 'first-slow', items: [] },
+      second: { sync: 'second-sync', slow: 'second-slow' },
+    });
+    expect(result.initialResult.hasNext).to.equal(true);
+    expect(result.initialResult.pending).to.have.lengthOf(2);
+
+    controller.abort(abortReason);
+
+    await expectPromise(result.subsequentResults.next()).toRejectWith(
+      abortReason.message,
+    );
+
+    const captured = await withUnhandledRejectionCapture(async () => {
+      fixture.firstDeferred.resolve('late-deferred');
+      fixture.stream.resolveNext({ value: 'late-item', done: false });
+      await flushMicrotasks(5);
+    });
+
+    expect(captured.unhandled).to.deep.equal([]);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+  });
+
+  it('discards a queued deferred patch when abort arrives before consumption', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const resultPromise = executeCombined(fixture, controller);
+    await flushMicrotasks();
+    await resolveInitialPayload(fixture);
+    const result = await resultPromise;
+
+    assert('initialResult' in result);
+    if (!('initialResult' in result)) {
+      return;
+    }
+
+    fixture.firstDeferred.resolve('deferred-value');
+    await flushMicrotasks();
+
+    controller.abort(abortReason);
+
+    const nextResult = result.subsequentResults.next();
+    await expectPromise(nextResult).toRejectWith(abortReason.message);
+
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+
+    fixture.stream.resolveNext({ value: 'late-item', done: false });
+    await flushMicrotasks(3);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+  });
+
+  it('cancels after the stream has delivered partial items', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const resultPromise = executeCombined(fixture, controller);
+    await flushMicrotasks();
+    await resolveInitialPayload(fixture);
+    const result = await resultPromise;
+
+    assert('initialResult' in result);
+    if (!('initialResult' in result)) {
+      return;
+    }
+
+    expect(result.initialResult.data).to.deep.equal({
+      first: { sync: 'first-sync', slow: 'first-slow', items: [] },
+      second: { sync: 'second-sync', slow: 'second-slow' },
+    });
+
+    const iterator = result.subsequentResults[Symbol.asyncIterator]();
+
+    const firstPatchPromise = iterator.next();
+    await flushMicrotasks();
+    fixture.stream.resolveNext({ value: 'item-1', done: false });
+    const firstPatch = await firstPatchPromise;
+    expect(firstPatch.done).to.equal(false);
+    const firstIncremental = firstPatch.value?.incremental?.[0];
+    assert(firstIncremental !== undefined && 'items' in firstIncremental);
+    expect(firstIncremental.items).to.deep.equal(['item-1']);
+
+    const secondPatchPromise = iterator.next();
+    await flushMicrotasks();
+    fixture.stream.resolveNext({ value: 'item-2', done: false });
+    const secondPatch = await secondPatchPromise;
+    expect(secondPatch.done).to.equal(false);
+    const secondIncremental = secondPatch.value?.incremental?.[0];
+    assert(secondIncremental !== undefined && 'items' in secondIncremental);
+    expect(secondIncremental.items).to.deep.equal(['item-2']);
+
+    const thirdPatchPromise = iterator.next();
+    await flushMicrotasks();
+
+    controller.abort(abortReason);
+
+    await expectPromise(thirdPatchPromise).toRejectWith(abortReason.message);
+
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+
+    fixture.stream.resolveNext({ value: 'item-3', done: false });
+    fixture.firstDeferred.resolve('late-deferred');
+    await flushMicrotasks(5);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+  });
+
+  it('bubbles non-null errors from deferred fields and cleans up on external abort', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const resultPromise = executeCombined(fixture, controller);
+    await flushMicrotasks();
+    await resolveInitialPayload(fixture);
+    const result = await resultPromise;
+
+    assert('initialResult' in result);
+    if (!('initialResult' in result)) {
+      return;
+    }
+
+    expect(result.initialResult.errors).to.equal(undefined);
+
+    const iterator = result.subsequentResults[Symbol.asyncIterator]();
+
+    const patchPromise = iterator.next();
+    await flushMicrotasks();
+
+    fixture.firstDeferred.resolve(null);
+    await flushMicrotasks(3);
+
+    const patch = await patchPromise;
+    expect(patch.done).to.equal(false);
+
+    const completed = patch.value?.completed;
+    assert(completed !== undefined && completed.length > 0);
+    assert(completed[0]?.errors !== undefined);
+    expect(completed[0]?.errors?.[0]?.message).to.include(
+      'non-nullable field',
+    );
+
+    expect(fixture.stream.returnSpy.callCount).to.equal(0);
+
+    const nextAfterPatch = iterator.next();
+    await flushMicrotasks();
+
+    controller.abort(abortReason);
+
+    await expectPromise(nextAfterPatch).toRejectWith(abortReason.message);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+
+    fixture.stream.resolveNext({ value: 'late', done: false });
+    await flushMicrotasks(3);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+  });
+
+  it('does not leak unhandled rejections when resolvers reject in different orders after abort', async () => {
+    const controller = createAbortController();
+    const fixture = createFixture();
+
+    const captured = await withUnhandledRejectionCapture(async () => {
+      const resultPromise = executeCombined(fixture, controller);
+      await flushMicrotasks();
+      await resolveInitialPayload(fixture);
+      const result = await resultPromise;
+      assert('initialResult' in result);
+      if (!('initialResult' in result)) {
+        return;
+      }
+
+      const nextPromise = result.subsequentResults.next();
+      await flushMicrotasks();
+
+      controller.abort(abortReason);
+      await expectPromise(nextPromise).toReject();
+
+      fixture.firstDeferred.reject(new Error('deferred rejected late'));
+      fixture.stream.resolveNext({ value: 'late', done: false });
+      await flushMicrotasks(5);
+    });
+
+    expect(captured.error).to.equal(undefined);
+    expect(captured.unhandled).to.deep.equal([]);
+    expect(fixture.stream.returnSpy.callCount).to.equal(1);
+  });
+});

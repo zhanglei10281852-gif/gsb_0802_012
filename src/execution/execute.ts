@@ -1065,9 +1065,50 @@ export function mapSourceToResponseEvent(
   const externalAbortSignal = validatedExecutionArgs.externalAbortSignal;
   if (externalAbortSignal) {
     const generator = mapAsyncIterable(sourceEventStream, mapFn);
+    let settled = false;
+    const settle = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      externalAbortSignal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = (): void => {
+      settle();
+      generator.return().catch(() => {
+        // ignore errors
+      });
+    };
+    if (externalAbortSignal.aborted) {
+      onAbort();
+    } else {
+      externalAbortSignal.addEventListener('abort', onAbort);
+    }
     return {
       ...generator,
-      next: () => cancellablePromise(generator.next(), externalAbortSignal),
+      next() {
+        const result = cancellablePromise(
+          generator.next(),
+          externalAbortSignal,
+        );
+        result.then(
+          (iteration) => {
+            if (iteration.done) {
+              settle();
+            }
+          },
+          () => settle(),
+        );
+        return result;
+      },
+      return() {
+        settle();
+        return generator.return();
+      },
+      throw(error?: unknown) {
+        settle();
+        return generator.throw(error);
+      },
     };
   }
   return mapAsyncIterable(sourceEventStream, mapFn);

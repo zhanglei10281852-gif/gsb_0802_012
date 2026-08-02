@@ -137,6 +137,41 @@ in files with the `.js` extension and the ESModule build within `.mjs` files.
 
 We actively welcome pull requests. Learn how to [contribute](./.github/CONTRIBUTING.md).
 
+### Abort Signal Regression Checks
+
+GraphQL.js supports client-side cancellation through the `AbortSignal` API
+passed to `execute`, `subscribe`, and `experimentalExecuteIncrementally`. A set
+of regression tests verifies that cancellation works correctly across all
+execution paths:
+
+- **Unit tests** (`src/execution/__tests__/abort-test.ts`) cover cancellation
+  before execution starts, during pending resolvers, during async list
+  iteration, for subscriptions, and for incremental `@defer`/`@stream`
+  results—including non-null error bubbling and iterator cleanup.
+- **Diagnostics lifecycle tests**
+  (`src/execution/__tests__/diagnostics-abort-test.ts`) verify that
+  `node:diagnostics_channel` subscribers see exactly one `start`/`end`
+  (and at most one `error`) per operation across normal completion, user
+  cancellation, and resolver failure.
+- **Build artifact integration test**
+  (`src/__tests__/npmDist-abort-integration-test.ts`) spawns a child process
+  that imports the built ESM entry from `npmDist` and runs cancellable
+  incremental queries and subscriptions. It skips automatically when
+  `npmDist` is absent.
+
+Run the full abort regression suite:
+
+```sh
+npm run testonly -- src/execution/__tests__/abort-test.ts src/execution/__tests__/diagnostics-abort-test.ts
+```
+
+To also verify the built artifact:
+
+```sh
+npm run build:npm
+npm run testonly -- src/__tests__/npmDist-abort-integration-test.ts
+```
+
 This repository is managed by EasyCLA. Project participants must sign the free [GraphQL Specification Membership agreement](https://preview-spec-membership.graphql.org) before making a contribution. You only need to do this one time, and it can be signed by [individual contributors](http://individual-spec-membership.graphql.org/) or their [employers](http://corporate-spec-membership.graphql.org/).
 
 To initiate the signature process please open a PR against this repo. The EasyCLA bot will block the merge if we still need a membership agreement from you.

@@ -290,7 +290,12 @@ export class Executor<
     const externalAbortSignal = this.validatedExecutionArgs.externalAbortSignal;
     let removeExternalAbortListener: (() => void) | undefined;
     if (externalAbortSignal) {
-      externalAbortSignal.throwIfAborted();
+      if (externalAbortSignal.aborted) {
+        this.abort(externalAbortSignal.reason);
+        return Promise.reject(
+          this.createAbortedExecutionError(this.buildResponse(null)),
+        );
+      }
       const onExternalAbort = () => {
         this.abort(externalAbortSignal.reason);
       };
@@ -906,6 +911,28 @@ export class Executor<
     const asyncIterator = items[Symbol.asyncIterator]();
     let index = 0;
     let iteration;
+    let iteratorReturned = false;
+    const returnIterator = (): void => {
+      if (iteratorReturned) {
+        return;
+      }
+      iteratorReturned = true;
+      this.sharedExecutionContext.asyncWorkTracker.add(
+        returnIteratorCatchingErrors(asyncIterator),
+      );
+    };
+    const abortSignal = this.getAbortSignal();
+    let onAbort: (() => void) | undefined;
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        returnIterator();
+        throw new Error('Aborted!');
+      }
+      onAbort = () => {
+        returnIterator();
+      };
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
     try {
       while (true) {
         if (
@@ -952,24 +979,22 @@ export class Executor<
         index++;
       }
     } catch (error) {
-      this.sharedExecutionContext.asyncWorkTracker.add(
-        returnIteratorCatchingErrors(asyncIterator),
-      );
+      returnIterator();
       if (containsPromise) {
         this.sharedExecutionContext.asyncWorkTracker.addValues(
           completedResults,
         );
       }
       throw error;
+    } finally {
+      if (onAbort) {
+        abortSignal?.removeEventListener('abort', onAbort);
+      }
     }
 
     // Throwing on completion outside of the loop may allow engines to better optimize
     if (this.aborted) {
-      if (!iteration?.done) {
-        this.sharedExecutionContext.asyncWorkTracker.add(
-          returnIteratorCatchingErrors(asyncIterator),
-        );
-      }
+      returnIterator();
       throw new Error('Aborted!');
     }
 

@@ -17,16 +17,27 @@ export function mapAsyncIterable<T, U>(
   const returnFn = iterator.return?.bind(iterator);
   const throwFn = iterator.throw?.bind(iterator);
 
+  let abruptClose = false;
+
   const onReturn = returnFn
-    ? () => callIgnoringErrors(returnFn)
-    : () => Promise.resolve();
+    ? () => {
+        abruptClose = true;
+        return callIgnoringErrors(returnFn);
+      }
+    : () => {
+        abruptClose = true;
+        return Promise.resolve();
+      };
 
   const onThrow = throwFn
-    ? (reason?: unknown) => callIgnoringErrors(() => throwFn(reason))
+    ? (reason?: unknown) => {
+        abruptClose = true;
+        return callIgnoringErrors(() => throwFn(reason));
+      }
     : onReturn;
 
   return withConcurrentAbruptClose(
-    mapAsyncIterableImpl(iterable, callback),
+    mapAsyncIterableImpl(iterator, callback, () => abruptClose),
     onReturn,
     onThrow,
   );
@@ -40,16 +51,33 @@ async function callIgnoringErrors(fn: () => Promise<unknown>): Promise<void> {
   }
 }
 
-async function* mapAsyncIterableImpl<T, U, R = undefined>(
-  iterable: AsyncGenerator<T, R, void> | AsyncIterable<T>,
+async function* mapAsyncIterableImpl<T, U>(
+  iterator: AsyncIterator<T>,
   mapFn: (value: T) => PromiseOrValue<U>,
+  isAbruptClose: () => boolean,
 ): AsyncGenerator<U, void, void> {
-  for await (const value of iterable) {
-    const result = mapFn(value);
-    if (isPromise(result)) {
-      yield await result;
-      continue;
+  let earlyExit = true;
+  try {
+    while (true) {
+      // eslint-disable-next-line no-await-in-loop
+      const iteration = await iterator.next();
+      if (iteration.done) {
+        earlyExit = false;
+        return;
+      }
+      const result = mapFn(iteration.value);
+      if (isPromise(result)) {
+        // eslint-disable-next-line no-await-in-loop
+        yield await result;
+        continue;
+      }
+      yield result;
     }
-    yield result;
+  } finally {
+    if (earlyExit && !isAbruptClose()) {
+      await callIgnoringErrors(async () => {
+        await iterator.return?.();
+      });
+    }
   }
 }

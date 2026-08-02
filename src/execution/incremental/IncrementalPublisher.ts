@@ -4,6 +4,7 @@ import { pathToArray } from '../../jsutils/Path.ts';
 import { ensureGraphQLError } from '../../error/ensureGraphQLError.ts';
 import type { GraphQLError } from '../../error/GraphQLError.ts';
 
+import { AbortedGraphQLExecutionError } from '../AbortedGraphQLExecutionError.ts';
 import { mapAsyncIterable } from '../mapAsyncIterable.ts';
 import { withConcurrentAbruptClose } from '../withConcurrentAbruptClose.ts';
 
@@ -56,9 +57,14 @@ export class IncrementalPublisher {
     >(work);
 
     function abort(): void {
-      subsequentResults.throw(abortSignal?.reason).catch(() => {
-        // Ignore errors
-      });
+      const reason = abortSignal?.reason;
+      subsequentResults
+        .throw(
+          new AbortedGraphQLExecutionError(reason, Promise.resolve(undefined)),
+        )
+        .catch(() => {
+          // Ignore errors
+        });
     }
 
     if (abortSignal) {

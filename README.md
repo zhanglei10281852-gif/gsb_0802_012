@@ -133,6 +133,36 @@ the appropriate files. Tools that do not support `exports` will find the CommonJ
 and ESModule builds side by side, with the CommonJS code packaged
 in files with the `.js` extension and the ESModule build within `.mjs` files.
 
+## Cancellation Regression Checks
+
+Execution cancellation (for ordinary execution, subscriptions, and incremental
+`@defer`/`@stream` queries) is covered at two levels so the behavior is verified
+both against the TypeScript sources and against the published npm build artifact.
+
+- **Unit tests** drive the public root export (`execute`, `subscribe`, and
+  `experimentalExecuteIncrementally`) with controllable promises and async
+  iterators. They assert the `node:diagnostics_channel` `graphql:execute` and
+  `graphql:subscribe` `start`/`end`/`asyncStart`/`asyncEnd`/`error` lifecycle and
+  verify that normal completion, user cancellation (`AbortSignal`), and resolver
+  failure do not emit duplicate terminal events or leave active source iterators
+  behind. Run them with:
+
+  ```sh
+  npm run testonly -- src/execution/__tests__/abortSignal-test.ts src/execution/__tests__/publicExportCancellation-test.ts
+  ```
+
+- **Process-level integration test** (`integrationTests/cancellation-npm`)
+  imports GraphQL.js exclusively from the packed `npmDist` ESM entry and repeats a
+  cancellable incremental query and subscription across the normal/cancel/failure
+  paths. It runs as part of the integration suite, which first builds `npmDist`:
+
+  ```sh
+  npm run check:integrations
+  ```
+
+  To run just this project after `npm run build:npm`, install the packed archive
+  and execute its `test` script from `integrationTests/cancellation-npm`.
+
 ## Contributing
 
 We actively welcome pull requests. Learn how to [contribute](./.github/CONTRIBUTING.md).

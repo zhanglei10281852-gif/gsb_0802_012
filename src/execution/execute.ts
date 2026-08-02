@@ -38,6 +38,7 @@ import {
   traceMixed,
 } from '../diagnostics.ts';
 
+import { AbortedGraphQLExecutionError } from './AbortedGraphQLExecutionError.ts';
 import { buildResolveInfo } from './buildResolveInfo.ts';
 import { cancellablePromise } from './cancellablePromise.ts';
 import type { FieldDetailsList, FragmentDetails } from './collectFields.ts';
@@ -1067,7 +1068,41 @@ export function mapSourceToResponseEvent(
     const generator = mapAsyncIterable(sourceEventStream, mapFn);
     return {
       ...generator,
-      next: () => cancellablePromise(generator.next(), externalAbortSignal),
+      next: () => {
+        const nextPromise = generator.next();
+        if (externalAbortSignal.aborted) {
+          return Promise.reject(
+            new AbortedGraphQLExecutionError(
+              externalAbortSignal.reason,
+              nextPromise,
+            ),
+          );
+        }
+        return new Promise<IteratorResult<ExecutionResult, void>>(
+          (resolve, reject) => {
+            const onAbort = () => {
+              externalAbortSignal.removeEventListener('abort', onAbort);
+              reject(
+                new AbortedGraphQLExecutionError(
+                  externalAbortSignal.reason,
+                  nextPromise,
+                ),
+              );
+            };
+            externalAbortSignal.addEventListener('abort', onAbort);
+            nextPromise.then(
+              (value) => {
+                externalAbortSignal.removeEventListener('abort', onAbort);
+                resolve(value);
+              },
+              (error: unknown) => {
+                externalAbortSignal.removeEventListener('abort', onAbort);
+                reject(error);
+              },
+            );
+          },
+        );
+      },
     };
   }
   return mapAsyncIterable(sourceEventStream, mapFn);

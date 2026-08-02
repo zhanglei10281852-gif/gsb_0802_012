@@ -49,6 +49,9 @@ describe('Integration Tests', () => {
   testOnNodeProject('node');
   testOnNodeProject('webpack');
 
+  // Cancellation regression against the published npm build artifact.
+  testOnNodeProject('cancellation-npm');
+
   // Tracing channel tests
   testOnNodeProject('diagnostics-bun');
   testOnNodeProject('diagnostics-deno-with-deno-build');

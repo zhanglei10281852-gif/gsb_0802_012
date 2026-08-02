@@ -1,0 +1,11 @@
+{
+  "description": "cancellation regression should run against the published npm ESM build artifact",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "graphql": "file:../graphql.tgz"
+  }
+}

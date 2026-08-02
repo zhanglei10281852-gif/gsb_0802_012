@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "description": "graphql-js cancellation and diagnostics lifecycle should work on the built package",
+  "type": "module",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "graphql": "file:../graphql.tgz"
+  }
+}

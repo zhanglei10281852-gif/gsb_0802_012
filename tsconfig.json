@@ -1,0 +1,47 @@
+{
+  "include": [
+    "src/**/*",
+    "integrationTests/*",
+    "resources/**/*",
+    "benchmark/benchmark.ts"
+  ],
+  "compilerOptions": {
+    "lib": ["es2024"],
+    "types": ["node"],
+    "target": "es2021",
+    "sourceMap": true,
+    "inlineSources": true,
+    "module": "node16",
+    "moduleResolution": "node16",
+    "declaration": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "isolatedDeclarations": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowImportingTsExtensions": true,
+
+    // Disabled because TypeScript cannot choose rewrite targets per build.
+    // We need extension rewrites that differ across ESM/CJS/Deno outputs,
+    // so resources/change-extension-in-import-paths.ts handles this explicitly.
+    "rewriteRelativeImportExtensions": false,
+
+    // Type Checking
+    // https://www.typescriptlang.org/tsconfig#Type_Checking_6248
+    "strict": true,
+    // All checks that are not part of "strict"
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "erasableSyntaxOnly": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": false, // TODO consider
+    "noImplicitOverride": true,
+    "noImplicitReturns": false, // TODO consider
+    "noPropertyAccessFromIndexSignature": false, // TODO consider
+    "noUncheckedIndexedAccess": false, // FIXME
+    "noUncheckedSideEffectImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowSyntheticDefaultImports": true
+  }
+}

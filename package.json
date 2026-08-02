@@ -1,0 +1,77 @@
+{
+  "name": "graphql",
+  "version": "17.0.2",
+  "description": "A Query Language and Runtime which can target any service.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "typesVersions": {
+    ">=4.4.0": {
+      "*": [
+        "*"
+      ]
+    }
+  },
+  "sideEffects": false,
+  "homepage": "https://github.com/graphql/graphql-js",
+  "bugs": {
+    "url": "https://github.com/graphql/graphql-js/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/graphql/graphql-js.git"
+  },
+  "keywords": [
+    "graphql",
+    "graphql-js"
+  ],
+  "engines": {
+    "node": "^22.0.0 || ^24.0.0 || ^25.0.0 || >=26.0.0"
+  },
+  "scripts": {
+    "node:test": "node --experimental-strip-types --throw-deprecation --test --experimental-test-isolation=none --test-concurrency=1 --test-reporter=spec",
+    "fuzzonly": "npm run node:test -- \"src/**/__tests__/**/*-fuzz.ts\"",
+    "changelog": "node --experimental-strip-types resources/gen-changelog.ts",
+    "release:prepare": "node --experimental-strip-types resources/release-prepare.ts",
+    "release:metadata": "node --experimental-strip-types resources/release-metadata.ts",
+    "benchmark": "node --experimental-strip-types resources/benchmark.ts",
+    "test": "npm run lint && npm run check && npm run testonly:cover && npm run prettier:check && npm run prettier:examples:check && npm run check:spelling && npm run check:integrations",
+    "lint": "eslint --cache --max-warnings 0 .",
+    "check": "npm run check:ts && npm run check:deno",
+    "check:ts": "tsc --pretty",
+    "check:deno": "npm run build:deno && deno publish --dry-run --allow-dirty --config denoDist/jsr.json",
+    "testonly": "npm run node:test -- \"src/**/__tests__/**/*-test.ts\"",
+    "testonly:cover": "npm run node:test -- --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-coverage-exclude=\"src/**/__tests__/**\" --test-coverage-exclude=\"**/*-test.ts\" --test-coverage-lines=100 --test-coverage-branches=100 --test-coverage-functions=100 \"src/**/__tests__/**/*-test.ts\"",
+    "testonly:watch": "npm run node:test -- --watch \"src/**/__tests__/**/*-test.ts\"",
+    "prettier": "prettier --cache --cache-strategy metadata --write --list-different .",
+    "prettier:check": "prettier --cache --cache-strategy metadata --check .",
+    "prettier:examples": "node --experimental-strip-types resources/prettier-examples.ts --write",
+    "prettier:examples:check": "node --experimental-strip-types resources/prettier-examples.ts --check",
+    "precommit": "lint-staged",
+    "check:spelling": "cspell --cache --no-progress \"**/*\"",
+    "check:integrations": "npm run node:test -- \"resources/integration-test.ts\"",
+    "build:npm": "node --experimental-strip-types resources/build-npm.ts",
+    "build:deno": "node --experimental-strip-types resources/build-deno.ts",
+    "diff:npm": "node --experimental-strip-types resources/diff-npm-package.ts",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@types/chai": "5.2.3",
+    "@types/node": "25.3.0",
+    "chai": "6.2.2",
+    "cspell": "9.6.4",
+    "eslint": "9.39.3",
+    "eslint-plugin-import": "2.32.0",
+    "eslint-plugin-jsdoc": "62.9.0",
+    "eslint-plugin-n": "17.24.0",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "eslint-plugin-simple-import-sort": "12.1.1",
+    "husky": "9.1.7",
+    "lint-staged": "16.2.7",
+    "mitata": "1.0.34",
+    "prettier": "3.8.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.59.0"
+  }
+}

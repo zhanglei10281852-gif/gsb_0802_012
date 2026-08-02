@@ -1,0 +1,443 @@
+import { describe, it } from 'node:test';
+
+import { expect } from 'chai';
+
+import { expectPromise } from '../../__testUtils__/expectPromise.ts';
+import { resolveOnNextTick } from '../../__testUtils__/resolveOnNextTick.ts';
+import { withAsyncUsing } from '../../__testUtils__/withAsyncUsing.ts';
+
+import { mapAsyncIterable } from '../mapAsyncIterable.ts';
+
+/* eslint-disable @typescript-eslint/require-await */
+describe('mapAsyncIterable', () => {
+  it('maps over async generator', async () => {
+    async function* source() {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 6, done: false });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('maps over async iterable', async () => {
+    const items = [1, 2, 3];
+
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+
+      next(): Promise<IteratorResult<number, void>> {
+        if (items.length > 0) {
+          const value = items[0];
+          items.shift();
+          return Promise.resolve({ done: false, value });
+        }
+
+        return Promise.resolve({ done: true, value: undefined });
+      },
+    };
+
+    const doubles = mapAsyncIterable(iterable, (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 6, done: false });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('compatible with for-await-of', async () => {
+    async function* source() {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    const result = [];
+    for await (const x of doubles) {
+      result.push(x);
+    }
+    expect(result).to.deep.equal([2, 4, 6]);
+  });
+
+  it('maps over async values with async function', async () => {
+    async function* source() {
+      yield 1;
+      yield 2;
+      yield 3;
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => Promise.resolve(x + x));
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 6, done: false });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('allows returning early from mapped async generator', async () => {
+    async function* source() {
+      yield 1;
+      /* node:coverage ignore next 3 */
+      yield 2;
+      yield 3; // Shouldn't be reached.
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+
+    // Early return
+    expect(await doubles.return()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+
+    // Subsequent next calls
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('allows returning early from mapped async iterable', async () => {
+    const items = [1, 2, 3];
+
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next() {
+        const value = items[0];
+        items.shift();
+        return Promise.resolve({
+          done: items.length === 0,
+          value,
+        });
+      },
+    };
+
+    const doubles = mapAsyncIterable(iterable, (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+
+    // Early return
+    expect(await doubles.return()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('passes through early return from async values', async () => {
+    async function* source() {
+      yield 'a';
+      /* node:coverage ignore next 3 */
+      yield 'b';
+      yield 'c'; // Shouldn't be reached.
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 'aa', done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 'bb', done: false });
+
+    // Early return
+    expect(await doubles.return()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+
+    // Subsequent next calls
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('allows throwing errors through async iterable', async () => {
+    const items = [1, 2, 3];
+
+    const iterable = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next() {
+        const value = items[0];
+        items.shift();
+        return Promise.resolve({
+          done: items.length === 0,
+          value,
+        });
+      },
+    };
+
+    const doubles = mapAsyncIterable(iterable, (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+
+    // Throw error
+    const message = 'allows throwing errors when mapping async iterable';
+    const thrown = doubles.throw(new Error(message));
+    await expectPromise(thrown).toRejectWith(message);
+  });
+
+  it('close source when mapped iterable is thrown even when the underlying source does not implement a throw method', async () => {
+    const items = [1, 2, 3];
+    let returned = false;
+    const iterable: AsyncIterableIterator<number> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next() {
+        if (returned) {
+          return Promise.resolve({ done: true, value: undefined });
+        }
+        const value = items[0];
+        items.shift();
+        return Promise.resolve({
+          done: items.length === 0,
+          value,
+        });
+      },
+      return: () => {
+        returned = true;
+        return Promise.resolve({ done: true, value: undefined });
+      },
+    };
+
+    const doubles = mapAsyncIterable(iterable, (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+
+    // Throw error
+    const message = 'allows throwing errors when mapping async iterable';
+    const thrown = doubles.throw(new Error(message));
+    await expectPromise(thrown).toRejectWith(message);
+
+    // Returns early when throwing errors through async iterable
+    expect(returned).to.equal(true);
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('waits for source handlers before actually throwing', async () => {
+    const abortReason = new Error('aborted');
+    let storedReason: unknown;
+
+    const iterable: AsyncIterableIterator<number> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next() {
+        return Promise.resolve({ value: 1, done: false });
+      },
+      async throw(reason?: unknown) {
+        if (storedReason === undefined) {
+          await resolveOnNextTick();
+          // eslint-disable-next-line require-atomic-updates
+          storedReason = reason;
+          return { value: undefined, done: true };
+        }
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw storedReason;
+      },
+      return() {
+        return Promise.resolve({ value: undefined, done: true });
+      },
+    };
+
+    const mapped = mapAsyncIterable(iterable, (x) => x);
+
+    expect(await mapped.next()).to.deep.equal({ value: 1, done: false });
+
+    const thrown = mapped.throw(abortReason);
+    await expectPromise(thrown).toRejectWith('aborted');
+    expect(storedReason).to.equal(abortReason);
+  });
+
+  it('throws given reason, ignoring source throw result', async () => {
+    const iterable: AsyncIterableIterator<number> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next() {
+        return Promise.resolve({ value: 1, done: false });
+      },
+      throw(_reason?: unknown) {
+        return Promise.resolve({ value: 1, done: false });
+      },
+      return() {
+        return Promise.resolve({ value: undefined, done: true });
+      },
+    };
+
+    const mapped = mapAsyncIterable(iterable, (x) => x);
+
+    expect(await mapped.next()).to.deep.equal({ value: 1, done: false });
+
+    const abortReason = new Error('aborted');
+    const thrown = mapped.throw(abortReason);
+    await expectPromise(thrown).toRejectWith('aborted');
+  });
+
+  it('passes through caught errors through async generators', async () => {
+    async function* source() {
+      yield 1;
+      /* node:coverage ignore next 2 */
+      yield 2;
+      yield 3; // Shouldn't be reached.
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+    expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+
+    // Throw error
+    await expectPromise(doubles.throw(new Error('Ouch'))).toRejectWith('Ouch');
+
+    // Subsequent next calls
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+    expect(await doubles.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  it('does not normally map over thrown errors', async () => {
+    async function* source() {
+      yield 'Hello';
+      throw new Error('Goodbye');
+    }
+
+    const doubles = mapAsyncIterable(source(), (x) => x + x);
+
+    expect(await doubles.next()).to.deep.equal({
+      value: 'HelloHello',
+      done: false,
+    });
+
+    await expectPromise(doubles.next()).toRejectWith('Goodbye');
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters
+  async function testClosesSourceWithMapper<T>(mapper: (value: number) => T) {
+    let didVisitFinally = false;
+
+    async function* source() {
+      try {
+        yield 1;
+        /* node:coverage ignore next 3 */
+        yield 2;
+        yield 3; // Shouldn't be reached.
+      } finally {
+        didVisitFinally = true;
+        yield 1000;
+      }
+    }
+
+    const throwOver1 = mapAsyncIterable(source(), mapper);
+
+    expect(await throwOver1.next()).to.deep.equal({ value: 1, done: false });
+
+    await expectPromise(throwOver1.next()).toRejectWith('Cannot count to 2');
+
+    expect(await throwOver1.next()).to.deep.equal({
+      value: undefined,
+      done: true,
+    });
+
+    expect(didVisitFinally).to.equal(true);
+  }
+
+  it('closes source if mapper throws an error', async () => {
+    await testClosesSourceWithMapper((x) => {
+      if (x > 1) {
+        throw new Error('Cannot count to ' + x);
+      }
+      return x;
+    });
+  });
+
+  it('closes source if mapper rejects', async () => {
+    await testClosesSourceWithMapper((x) =>
+      x > 1
+        ? Promise.reject(new Error('Cannot count to ' + x))
+        : Promise.resolve(x),
+    );
+  });
+
+  it('disposes of async generator', async () => {
+    let returned = false;
+
+    const items = [1, 2, 3];
+    const generator: AsyncGenerator<number, void, void> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next(): Promise<IteratorResult<number, void>> {
+        const value = items.shift();
+        if (value !== undefined) {
+          return Promise.resolve({ done: false, value });
+        }
+
+        return Promise.resolve({ done: true, value: undefined });
+      },
+      return(): Promise<IteratorResult<number, void>> {
+        returned = true;
+        return Promise.resolve({ done: true, value: undefined });
+      },
+      throw(): Promise<IteratorResult<number, void>> {
+        returned = true;
+        return Promise.reject(new Error());
+      },
+      async [Symbol.asyncDispose]() {
+        await this.return();
+      },
+    };
+
+    await withAsyncUsing(
+      mapAsyncIterable(generator, (x) => x + x),
+      async (doubles) => {
+        expect(await doubles.next()).to.deep.equal({ value: 2, done: false });
+        expect(await doubles.next()).to.deep.equal({ value: 4, done: false });
+      },
+    );
+
+    expect(returned).to.equal(true);
+  });
+});

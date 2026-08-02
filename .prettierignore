@@ -1,0 +1,4 @@
+# additive to .gitignore
+/website/next-env.d.ts
+/website/pages/api-v16/**
+/website/pages/api-v17/**

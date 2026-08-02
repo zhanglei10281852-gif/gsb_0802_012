@@ -1,0 +1,143 @@
+language: en
+useGitignore: true
+# TODO enableGlobDot: true
+ignorePaths:
+  # Excluded from spelling check
+  - cspell.yml
+  - package.json
+  - benchmark/github-schema.graphql
+  - benchmark/github-schema.json
+  - website/icons
+  - website/css
+  - website/pages/api-v16
+  - website/pages/api-v17
+overrides:
+  - filename: 'eslint.config.*'
+    words:
+      - chunkname
+      - nonconstructor
+      - nonoctal
+  - filename: 'website/**'
+    dictionaries:
+      - fullstack
+      - html
+    words:
+      - craco
+      - esbuild
+      - swcrc
+      - codegen
+      - subschema
+      - subschemas
+      - benjie
+      - codegen
+      - URQL
+      - tada
+      - Graphile
+
+validateDirectives: true
+ignoreRegExpList:
+  - u\{[0-9a-f]{1,8}\}
+
+words:
+  - graphiql
+  - Jsdocs
+  - metafield
+  - thunked
+  - uncoerce
+  - uncoerced
+
+  # Different names used inside tests
+  - Skywalker
+  - Leia
+  - Wilhuff
+  - Tarkin
+  - Artoo
+  - Threepio
+  - Odie
+  - Damerau
+  - Alderaan
+  - Tatooine
+  - astromech
+
+  # TODO: contribute upstream
+  - deno
+  - denoland
+  - hashbang
+  - vitest
+  - mitata
+  - Rollup
+  - Rspack
+  - Rsbuild
+  - Turbopack
+
+  # Website tech
+  - Nextra
+  - headlessui
+  - Fastify
+  - tailwindcss
+  - svgr
+  - ruru
+  - oneof
+  - vercel
+  - unbatched
+
+  # used as href anchors
+  - graphqlerror
+  - syntaxerror
+  - formaterror
+  - graphqlschema
+  - graphqlscalartype
+  - graphqlobjecttype
+  - graphqlinterfacetype
+  - graphqluniontype
+  - graphqlenumtype
+  - graphqlinputobjecttype
+  - graphqllist
+  - graphqlnonnull
+  - graphqlint
+  - graphqlfloat
+  - graphqlstring
+  - graphqlboolean
+  - graphqlid
+  - getlocation
+  - isinputtype
+  - isoutputtype
+  - isleaftype
+  - iscompositetype
+  - isabstracttype
+  - getnullabletype
+  - getnamedtype
+  - introspectionquery
+  - buildclientschema
+  - buildschema
+  - printschema
+  - printintrospectionschema
+  - buildastschema
+  - typefromast
+  - astfromvalue
+  - typeinfo
+  - isvalidjsvalue
+  - isvalidliteralvalue
+  - specifiedrules
+  - Wordmark
+  - codeofconduct
+  - graphqlconf
+  - dataloaders
+  - worktree
+  - worktrees
+
+  # website words
+  - runtimes
+
+  # TODO: remove bellow words
+  - QLID # GraphQLID
+  - QLJS # GraphQLJS
+  - iface
+  - Reqs
+  - FXXX
+  - XXXF
+  - bfnrt
+  - wrds
+  - overcomplicating
+  - cacheable
+  - pino

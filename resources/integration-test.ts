@@ -1,0 +1,84 @@
+import fs from 'node:fs';
+import { describe, it } from 'node:test';
+
+import { localRepoPath, makeTmpDir, npm, readPackageJSON } from './utils.ts';
+
+// Keep these pinned to minimum supported runtime versions so integration
+// checks continue to verify backward compatibility behavior.
+const BUN_VERSION = '1.2.18';
+const DENO_VERSION = '2.4.1';
+
+describe('Integration Tests', () => {
+  const { tmpDirPath } = makeTmpDir('graphql-js-integrationTmp');
+  fs.cpSync(localRepoPath('integrationTests'), tmpDirPath(), {
+    recursive: true,
+  });
+
+  npm().run('build:npm');
+
+  const distDir = localRepoPath('npmDist');
+  const archiveName = npm({ cwd: tmpDirPath(), quiet: true }).pack(distDir);
+  fs.renameSync(tmpDirPath(archiveName), tmpDirPath('graphql.tgz'));
+
+  npm().run('build:deno');
+  fs.cpSync(localRepoPath('denoDist'), tmpDirPath('graphql-deno-dist'), {
+    recursive: true,
+  });
+
+  function testOnNodeProject(projectName: string) {
+    const projectPath = tmpDirPath(projectName);
+    const packageJSON = readPackageJSON(projectPath);
+
+    it(packageJSON.description, { timeout: 120000 }, () => {
+      // TODO: figure out a way to run it with --ignore-scripts
+      npm({ cwd: projectPath, quiet: true }).install();
+      npm({
+        cwd: projectPath,
+        quiet: true,
+        env: {
+          ...process.env,
+          BUN_VERSION,
+          DENO_VERSION,
+        },
+      }).run('test');
+    });
+  }
+
+  testOnNodeProject('ts');
+  testOnNodeProject('ts-development-condition');
+  testOnNodeProject('node');
+  testOnNodeProject('webpack');
+
+  // Tracing channel tests
+  testOnNodeProject('diagnostics-bun');
+  testOnNodeProject('diagnostics-deno-with-deno-build');
+  testOnNodeProject('diagnostics-deno-with-node-build');
+
+  // Conditional export tests
+  testOnNodeProject('conditions');
+
+  // Development mode tests
+  testOnNodeProject('dev-explicit');
+  testOnNodeProject('dev-node');
+  testOnNodeProject('dev-deno-with-deno-build');
+  testOnNodeProject('dev-deno-with-node-build');
+  testOnNodeProject('dev-bun');
+  testOnNodeProject('dev-webpack');
+  testOnNodeProject('dev-rspack');
+  testOnNodeProject('dev-rollup');
+  testOnNodeProject('dev-esbuild');
+  testOnNodeProject('dev-swc');
+  testOnNodeProject('dev-jest');
+  testOnNodeProject('dev-vitest');
+
+  // Production mode tests
+  testOnNodeProject('prod-node');
+  testOnNodeProject('prod-deno-with-deno-build');
+  testOnNodeProject('prod-deno-with-node-build');
+  testOnNodeProject('prod-bun');
+  testOnNodeProject('prod-webpack');
+  testOnNodeProject('prod-rspack');
+  testOnNodeProject('prod-rollup');
+  testOnNodeProject('prod-esbuild');
+  testOnNodeProject('prod-swc');
+});

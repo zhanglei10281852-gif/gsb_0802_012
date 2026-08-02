@@ -1,0 +1,142 @@
+---
+title: Getting Started With GraphQL.js
+sidebarTitle: Getting Started
+---
+
+import { Tabs } from 'nextra/components';
+
+{/* title can be removed in Nextra 4, since sidebar title will take from first h1 */}
+
+# Getting Started With GraphQL.js
+
+## Prerequisites
+
+Before getting started, you should have Node.js 22 or newer installed. For this
+guide, we won't use any language features that require transpilation, but we
+will use some ES6 features like [Promises](http://web.dev/articles/promises/),
+classes, and arrow functions, so if you aren't familiar with them you might want
+to read up on them first.
+
+> Alternatively you can start from [this StackBlitz](https://stackblitz.com/edit/stackblitz-starters-znvgwr) - if you choose
+> this route you can skip to [Basic Types](./basic-types.mdx).
+
+GraphQL.js v17 is the current stable release. GraphQL.js v16 remains available
+for projects that still need older Node.js versions.
+
+## Setting Up Your Project
+
+To create a new project and install the latest stable release (v17) in your
+current directory:
+
+```sh npm2yarn
+npm init -y
+npm install graphql --save
+```
+
+After running these commands, you'll have:
+
+- `package.json` - your project configuration file
+- `node_modules/` - directory where npm packages are installed
+
+Next, you need to configure your project to support ES6 import/export syntax.
+Update your `package.json` to include `"type": "module"`:
+
+```json
+{
+  "type": "module",
+  "name": "graphql-starter",
+  "version": "1.0.0",
+  ...
+}
+```
+
+To install the latest v16 release instead, use the v16 package tag:
+
+```sh npm2yarn
+npm install graphql@16 --save
+```
+
+## Writing Code
+
+To handle GraphQL queries, we need a schema that defines the `Query` type, and we need an API root with a function called a "resolver" for each API endpoint. For an API that just returns "Hello world!", create a file named `server.js` in your project root (the same directory as your `package.json`):
+
+<Tabs items={['SDL', 'Code']}>
+  <Tabs.Tab>
+
+```javascript
+import { graphql, buildSchema } from 'graphql';
+
+// Construct a schema, using GraphQL schema language
+const schema = buildSchema(`type Query { hello: String } `);
+
+// The rootValue provides a resolver function for each API endpoint
+const rootValue = {
+  hello() {
+    return 'Hello world!';
+  },
+};
+
+// Run the GraphQL query '{ hello }' and print out the response
+graphql({
+  schema,
+  source: '{ hello }',
+  rootValue,
+}).then((response) => {
+  console.log(response);
+});
+```
+
+</Tabs.Tab>
+<Tabs.Tab>
+
+```javascript
+import {
+  graphql,
+  GraphQLSchema,
+  GraphQLObjectType,
+  GraphQLString,
+} from 'graphql';
+
+// Construct a schema
+const schema = new GraphQLSchema({
+  query: new GraphQLObjectType({
+    name: 'Query',
+    fields: {
+      hello: {
+        type: GraphQLString,
+        resolve: () => 'Hello world!',
+      },
+    },
+  }),
+});
+
+graphql({
+  schema,
+  source: '{ hello }',
+}).then((response) => {
+  console.log(response);
+});
+```
+
+</Tabs.Tab>
+</Tabs>
+
+If you run this with:
+
+```sh
+node server.js
+```
+
+You should see the GraphQL response printed out:
+
+```json
+{
+  "data": {
+    "hello": "Hello world!"
+  }
+}
+```
+
+Congratulations - you just executed a GraphQL query!
+
+For practical applications, you'll probably want to run GraphQL queries from an API server, rather than executing GraphQL with a command line tool. To use GraphQL for an API server over HTTP, check out [Running an Express GraphQL Server](./running-an-express-graphql-server).

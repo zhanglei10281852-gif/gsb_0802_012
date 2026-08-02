@@ -1,0 +1,334 @@
+import { describe, it } from 'node:test';
+
+import { buildSchema } from '../../utilities/buildASTSchema.ts';
+
+import { DeferStreamDirectiveOnRootFieldRule } from '../rules/DeferStreamDirectiveOnRootFieldRule.ts';
+
+import { expectValidationErrorsWithSchema } from './harness.ts';
+
+function expectErrors(queryStr: string) {
+  return expectValidationErrorsWithSchema(
+    schema,
+    DeferStreamDirectiveOnRootFieldRule,
+    queryStr,
+  );
+}
+
+function expectValid(queryStr: string) {
+  expectErrors(queryStr).toDeepEqual([]);
+}
+
+const schema = buildSchema(`
+  type Message {
+    body: String
+    sender: String
+  }
+
+  interface Root {
+    rootField: Message
+  }
+
+  type SubscriptionRoot implements Root {
+    subscriptionField: Message
+    subscriptionListField: [Message]
+    rootField: Message
+  }
+
+  type MutationRoot implements Root {
+    mutationField: Message
+    mutationListField: [Message]
+    rootField: Message
+  }
+
+  type QueryRoot implements Root {
+    message: Message
+    messages: [Message]
+    rootField: Message
+  }
+
+  schema {
+    query: QueryRoot
+    mutation: MutationRoot
+    subscription: SubscriptionRoot
+  }
+`);
+
+describe('Validate: Defer/Stream directive on root field', () => {
+  it('Defer fragment spread on root query field', () => {
+    expectValid(`
+      {
+        ...rootQueryFragment @defer
+      }
+      fragment rootQueryFragment on QueryRoot {
+        message {
+          body
+        }
+      }
+    `);
+  });
+
+  it('Defer inline fragment spread on root query field', () => {
+    expectValid(`
+      {
+        ... @defer {
+          message {
+            body
+          }
+        }
+      }
+    `);
+  });
+
+  it('Defer fragment spread on root mutation field', () => {
+    expectErrors(`
+      mutation {
+        ...rootFragment @defer
+        ...otherFragment
+      }
+      fragment otherFragment on MutationRoot {
+        ...rootFragment
+        mutationListField {
+          body
+        }
+      }
+      fragment rootFragment on MutationRoot {
+        mutationField {
+          body
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root mutation type "MutationRoot".',
+        locations: [{ line: 3, column: 25 }],
+      },
+    ]);
+  });
+  it('Fragment spread cycle on root mutation field', () => {
+    expectValid(`
+      mutation {
+        ...rootFragment
+      }
+      fragment rootFragment on MutationRoot {
+        ...otherFragment
+      }
+      fragment otherFragment on MutationRoot {
+        ...rootFragment
+      }
+    `);
+  });
+  it('Self-referencing fragment spread on root mutation field', () => {
+    expectValid(`
+      mutation {
+        ...rootFragment
+      }
+      fragment rootFragment on MutationRoot {
+        ...rootFragment
+      }
+    `);
+  });
+  it('Defer inline fragment spread on root mutation field', () => {
+    expectErrors(`
+      mutation {
+        ... @defer {
+          mutationField {
+            body
+          }
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root mutation type "MutationRoot".',
+        locations: [{ line: 3, column: 13 }],
+      },
+    ]);
+  });
+  it('Defer fragment spread on root mutation field interface', () => {
+    expectErrors(`
+      mutation {
+        ...rootFragment
+      }
+      fragment rootFragment on Root {
+        ... @defer {
+          rootField {
+            body
+          }
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root mutation type "MutationRoot".',
+        locations: [{ line: 6, column: 13 }],
+      },
+    ]);
+  });
+  it('Defer fragment spread on nested mutation field', () => {
+    expectValid(`
+      mutation {
+        mutationField {
+          ... @defer {
+            body
+          }
+        }
+      }
+    `);
+  });
+
+  it('Defer fragment spread on root subscription field interface', () => {
+    expectErrors(`
+      subscription {
+        ...rootFragment
+      }
+      fragment rootFragment on Root {
+        ... @defer {
+            rootField {
+              body
+            }
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root subscription type "SubscriptionRoot".',
+        locations: [{ line: 6, column: 13 }],
+      },
+    ]);
+  });
+  it('Defer fragment spread on root subscription field', () => {
+    expectErrors(`
+      subscription {
+        ...rootFragment @defer
+      }
+      fragment rootFragment on SubscriptionRoot {
+        subscriptionField {
+          body
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root subscription type "SubscriptionRoot".',
+        locations: [{ line: 3, column: 25 }],
+      },
+    ]);
+  });
+  it('Defer inline fragment spread on root subscription field', () => {
+    expectErrors(`
+      subscription {
+        ... @defer {
+          subscriptionField {
+            body
+          }
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Defer directive cannot be used on root subscription type "SubscriptionRoot".',
+        locations: [{ line: 3, column: 13 }],
+      },
+    ]);
+  });
+
+  it('Defer fragment spread on nested subscription field', () => {
+    expectValid(`
+      subscription {
+        subscriptionField {
+          ...nestedFragment @defer
+        }
+      }
+      fragment nestedFragment on Message {
+        body
+      }
+    `);
+  });
+  it('Stream field on root query field', () => {
+    expectValid(`
+      {
+        messages @stream {
+          name
+        }
+      }
+    `);
+  });
+  it('Stream field on fragment on root query field', () => {
+    expectValid(`
+      {
+        ...rootFragment
+      }
+      fragment rootFragment on QueryType {
+        messages @stream {
+          name
+        }
+      }
+    `);
+  });
+  it('Stream field on root mutation field', () => {
+    expectErrors(`
+      mutation {
+        mutationListField @stream {
+          name
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Stream directive cannot be used on root mutation type "MutationRoot".',
+        locations: [{ line: 3, column: 27 }],
+      },
+    ]);
+  });
+  it('Stream field on fragment on root mutation field', () => {
+    expectErrors(`
+      mutation {
+        ...rootFragment
+      }
+      fragment rootFragment on MutationRoot {
+        mutationListField @stream {
+          name
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Stream directive cannot be used on root mutation type "MutationRoot".',
+        locations: [{ line: 6, column: 27 }],
+      },
+    ]);
+  });
+  it('Stream field on root subscription field', () => {
+    expectErrors(`
+      subscription {
+        subscriptionListField @stream {
+          name
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Stream directive cannot be used on root subscription type "SubscriptionRoot".',
+        locations: [{ line: 3, column: 31 }],
+      },
+    ]);
+  });
+  it('Stream field on fragment on root subscription field', () => {
+    expectErrors(`
+      subscription {
+        ...rootFragment
+      }
+      fragment rootFragment on SubscriptionRoot {
+        subscriptionListField @stream {
+          name
+        }
+      }
+    `).toDeepEqual([
+      {
+        message:
+          'Stream directive cannot be used on root subscription type "SubscriptionRoot".',
+        locations: [{ line: 6, column: 31 }],
+      },
+    ]);
+  });
+});

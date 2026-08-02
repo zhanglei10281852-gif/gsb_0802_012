@@ -1,0 +1,266 @@
+import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import ts from 'typescript';
+
+import {
+  changeExtensionInImportPaths,
+  changeExtensionInImportPathsInBundle,
+} from './change-extension-in-import-paths.ts';
+import { inlineInvariant } from './inline-invariant.ts';
+import { stripPrivateDeclarations } from './strip-private-declarations.ts';
+import type { PlatformConditionalExports } from './utils.ts';
+import {
+  buildCJSDevModeStub,
+  buildESMDevModeStub,
+  prettify,
+  readPackageJSON,
+  readTSConfig,
+  showDirStats,
+  writeGeneratedFile,
+} from './utils.ts';
+
+const devTypeFiles = [
+  ['.ts', '.js'],
+  ['.mts', '.mjs'],
+] as const;
+
+console.log('\n./npmDist');
+await buildPackage('./npmDist');
+showDirStats('./npmDist');
+
+async function buildPackage(outDir: string): Promise<void> {
+  const devDir = path.join(outDir, '__dev__');
+
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(outDir);
+  fs.mkdirSync(devDir);
+
+  fs.copyFileSync('./LICENSE', `./${outDir}/LICENSE`);
+  fs.copyFileSync('./README.md', `./${outDir}/README.md`);
+
+  const packageJSON = readPackageJSON();
+
+  delete packageJSON.private;
+  delete packageJSON.scripts;
+  delete packageJSON.devDependencies;
+
+  assert(packageJSON.types === undefined, 'Unexpected "types" in package.json');
+  const supportedTSVersions = Object.keys(packageJSON.typesVersions);
+  assert(
+    supportedTSVersions.length === 1,
+    'Property "typesVersions" should have exactly one key.',
+  );
+  // TODO: revisit once TS implements https://github.com/microsoft/TypeScript/issues/32166
+  const notSupportedTSVersionFile = 'NotSupportedTSVersion.d.ts';
+  fs.writeFileSync(
+    path.join(outDir, notSupportedTSVersionFile),
+    // Provoke syntax error to show this message
+    `"Package 'graphql' support only TS versions that are ${supportedTSVersions[0]}".`,
+  );
+
+  packageJSON.typesVersions = {
+    ...packageJSON.typesVersions,
+    '*': { '*': [notSupportedTSVersionFile] },
+  };
+
+  delete packageJSON.type;
+  packageJSON.main = 'index.js';
+  packageJSON.module = 'index.mjs';
+  packageJSON.types = 'index.d.ts';
+
+  const { emittedTSFiles } = emitTSFiles({
+    outDir,
+    module: 'commonjs',
+    moduleResolution: 'node10',
+    extension: '.js',
+  });
+  emitTSFiles({ outDir, extension: '.mjs' });
+
+  packageJSON.exports = {};
+  for (const prodFile of emittedTSFiles) {
+    const { dir, base, name, ext } = path.parse(prodFile);
+
+    if (ext === '.map') {
+      continue;
+    } else if (path.basename(dir) === 'dev') {
+      packageJSON.exports['./dev'] = buildPlatformConditionalExports(
+        './dev',
+        'index',
+      );
+      continue;
+    }
+
+    const relativePathToProd = path.relative(prodFile, outDir);
+
+    const { name: innerName, ext: innerExt } = path.parse(name);
+
+    if (innerExt === '.d') {
+      const relativePathAndName = path.relative(outDir, `${dir}/${innerName}`);
+
+      for (const [typeExt, targetExt] of devTypeFiles) {
+        const line = `export * from '${relativePathToProd}/${relativePathAndName}${targetExt}';`;
+        writeGeneratedFile(
+          path.join(devDir, path.relative(outDir, `${dir}/${name}${typeExt}`)),
+          line,
+        );
+      }
+      continue;
+    }
+
+    const relativePathAndName = path.relative(outDir, `${dir}/${name}`);
+
+    writeGeneratedFile(
+      path.join(devDir, path.relative(outDir, `${dir}/${name}.js`)),
+      buildCJSDevModeStub(
+        `${relativePathToProd}/devMode.js`,
+        `${relativePathToProd}/${relativePathAndName}.js`,
+      ),
+    );
+
+    writeGeneratedFile(
+      path.join(devDir, path.relative(outDir, `${dir}/${name}.mjs`)),
+      buildESMDevModeStub(
+        `${relativePathToProd}/devMode.mjs`,
+        `${relativePathToProd}/${relativePathAndName}.mjs`,
+      ),
+    );
+
+    if (base === 'index.js') {
+      const dirname = path.dirname(relativePathAndName);
+      packageJSON.exports[dirname === '.' ? dirname : `./${dirname}`] = {
+        development: buildPlatformConditionalExports(
+          './__dev__',
+          relativePathAndName,
+        ),
+        default: buildPlatformConditionalExports('.', relativePathAndName),
+      };
+    }
+  }
+
+  const globEntryPoints = {
+    development: buildPlatformConditionalExports('./__dev__', '*'),
+    default: buildPlatformConditionalExports('.', '*'),
+  };
+  packageJSON.exports['./*.js'] = globEntryPoints;
+  packageJSON.exports['./*'] = globEntryPoints;
+
+  packageJSON.sideEffects = ['__dev__/*'];
+
+  const packageJsonPath = `./${outDir}/package.json`;
+  const prettified = await prettify(
+    packageJsonPath,
+    JSON.stringify(packageJSON),
+  );
+  // Should be done as the last step so only valid packages can be published
+  writeGeneratedFile(packageJsonPath, prettified);
+}
+
+// Based on https://github.com/Microsoft/TypeScript/wiki/Using-the-Compiler-API#getting-the-dts-from-a-javascript-file
+function emitTSFiles(options: {
+  outDir: string;
+  module?: string;
+  moduleResolution?: string;
+  extension: string;
+}): {
+  emittedTSFiles: ReadonlyArray<string>;
+} {
+  const { extension, ...rest } = options;
+  const rootFiles = ['src/index.ts', 'src/dev/index.ts'];
+  const jsOptions = readTSConfig({
+    ...rest,
+    noEmit: false,
+    declaration: false,
+    listEmittedFiles: true,
+    removeComments: true,
+  });
+  const dtsOptions = readTSConfig({
+    ...rest,
+    noEmit: false,
+    declaration: true,
+    declarationDir: rest.outDir,
+    emitDeclarationOnly: true,
+    listEmittedFiles: true,
+  });
+
+  const writeFile = (filepath: string, body: string) => {
+    if (extension === '.mjs') {
+      if (filepath.match(/.js$/)) {
+        let bodyToWrite = body;
+        bodyToWrite = bodyToWrite.replace(
+          '//# sourceMappingURL=graphql.js.map',
+          '//# sourceMappingURL=graphql.mjs.map',
+        );
+        writeGeneratedFile(filepath.replace(/.js$/, extension), bodyToWrite);
+        return;
+      }
+
+      if (filepath.match(/.js.map$/)) {
+        writeGeneratedFile(
+          filepath.replace(/.js.map$/, extension + '.map'),
+          body,
+        );
+        return;
+      }
+
+      if (filepath.match(/.d.ts$/)) {
+        writeGeneratedFile(filepath.replace(/.d.ts$/, '.d.mts'), body);
+        return;
+      }
+    }
+    writeGeneratedFile(filepath, body);
+  };
+
+  const jsHost = ts.createCompilerHost(jsOptions);
+  jsHost.writeFile = writeFile;
+  const jsProgram = ts.createProgram(rootFiles, jsOptions, jsHost);
+  const jsResult = jsProgram.emit(undefined, undefined, undefined, undefined, {
+    before: [changeExtensionInImportPaths({ extension })],
+    after: [inlineInvariant],
+  });
+
+  const dtsHost = ts.createCompilerHost(dtsOptions);
+  dtsHost.writeFile = writeFile;
+  const dtsProgram = ts.createProgram(rootFiles, dtsOptions, dtsHost);
+  const dtsResult = dtsProgram.emit(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    {
+      afterDeclarations: [
+        stripPrivateDeclarations(),
+        changeExtensionInImportPathsInBundle({ extension }),
+      ],
+    },
+  );
+
+  assert(
+    !jsResult.emitSkipped && !dtsResult.emitSkipped,
+    'Fail to generate `*.d.ts` files, please run `npm run check`',
+  );
+
+  assert(jsResult.emittedFiles != null);
+  assert(dtsResult.emittedFiles != null);
+  return {
+    emittedTSFiles: [...jsResult.emittedFiles, ...dtsResult.emittedFiles].sort(
+      (a, b) => a.localeCompare(b),
+    ),
+  };
+}
+
+function buildPlatformConditionalExports(
+  dir: string,
+  name: string,
+): PlatformConditionalExports {
+  const base = `./${path.join(dir, name)}`;
+  return {
+    module: `${base}.mjs`,
+    bun: `${base}.mjs`,
+    'module-sync': `${base}.mjs`,
+    node: `${base}.js`,
+    require: `${base}.js`,
+    default: `${base}.mjs`,
+  };
+}

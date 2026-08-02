@@ -1,0 +1,91 @@
+/** @category Validation Rules */
+
+import { GraphQLError } from '../../error/GraphQLError.ts';
+
+import type { DirectiveNode } from '../../language/ast.ts';
+import { Kind } from '../../language/kinds.ts';
+import type { ASTVisitor } from '../../language/visitor.ts';
+
+import {
+  GraphQLDeferDirective,
+  GraphQLStreamDirective,
+} from '../../type/directives.ts';
+
+import type { ValidationContext } from '../ValidationContext.ts';
+
+/**
+ * Defer and stream directive labels are unique
+ *
+ * A GraphQL document is only valid if defer and stream directives' label argument is static and unique.
+ * @param context - The validation context used while checking the document.
+ * @returns A visitor that reports validation errors for this rule.
+ * @example
+ * ```ts
+ * import { parse } from 'graphql/language';
+ * import { buildSchema } from 'graphql/utilities';
+ * import { validate, DeferStreamDirectiveLabelRule } from 'graphql/validation';
+ *
+ * const schema = buildSchema(`
+ *   type Query {
+ *     friends: [String]
+ *   }
+ * `);
+ * const invalidDocument = parse(`
+ *   {
+ *     friends @stream(label: "friends")
+ *     other: friends @stream(label: "friends")
+ *   }
+ * `);
+ * const validDocument = parse(`
+ *   {
+ *     friends @stream(label: "friends")
+ *     other: friends @stream(label: "otherFriends")
+ *   }
+ * `);
+ *
+ * validate(schema, invalidDocument, [DeferStreamDirectiveLabelRule]).length; // => 1
+ * validate(schema, validDocument, [DeferStreamDirectiveLabelRule]); // => []
+ * ```
+ */
+export function DeferStreamDirectiveLabelRule(
+  context: ValidationContext,
+): ASTVisitor {
+  const knownLabels = new Map<string, DirectiveNode>();
+  return {
+    Directive(node) {
+      if (
+        node.name.value === GraphQLDeferDirective.name ||
+        node.name.value === GraphQLStreamDirective.name
+      ) {
+        const labelArgument = node.arguments?.find(
+          (arg) => arg.name.value === 'label',
+        );
+        const labelValue = labelArgument?.value;
+        if (!labelValue || labelValue.kind === Kind.NULL) {
+          return;
+        }
+        if (labelValue.kind !== Kind.STRING) {
+          context.reportError(
+            new GraphQLError(
+              `Argument "@${node.name.value}(label:)" must be a static string.`,
+              { nodes: node },
+            ),
+          );
+          return;
+        }
+
+        const knownLabel = knownLabels.get(labelValue.value);
+        if (knownLabel != null) {
+          context.reportError(
+            new GraphQLError(
+              'Value for arguments "defer(label:)" and "stream(label:)" must be unique across all Defer/Stream directive usages.',
+              { nodes: [knownLabel, node] },
+            ),
+          );
+        } else {
+          knownLabels.set(labelValue.value, node);
+        }
+      }
+    },
+  };
+}

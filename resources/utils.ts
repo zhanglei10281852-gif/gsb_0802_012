@@ -1,0 +1,408 @@
+import assert from 'node:assert';
+import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import url from 'node:url';
+
+import prettier from 'prettier';
+import ts from 'typescript';
+
+export function localRepoPath(...paths: ReadonlyArray<string>): string {
+  const resourcesDir = path.dirname(url.fileURLToPath(import.meta.url));
+  const repoDir = path.join(resourcesDir, '..');
+  return path.join(repoDir, ...paths);
+}
+
+interface MakeTmpDirReturn {
+  tmpDirPath: (...paths: ReadonlyArray<string>) => string;
+}
+
+export function makeTmpDir(
+  name: string,
+  clear: boolean = true,
+): MakeTmpDirReturn {
+  const tmpDir = path.join(os.tmpdir(), name);
+  if (clear) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  return {
+    tmpDirPath: (...paths) => path.join(tmpDir, ...paths),
+  };
+}
+
+interface NPMOptions extends SpawnOptions {
+  quiet?: boolean;
+}
+
+export function npm(options?: NPMOptions) {
+  let npmCmd;
+  let globalOptions = options?.quiet === true ? ['--quiet'] : [];
+
+  // See: https://github.com/nodejs/node/issues/3675.
+  if (process.platform === 'win32') {
+    npmCmd = 'cmd';
+    globalOptions = ['/c', 'npm.cmd', ...globalOptions];
+  } else {
+    npmCmd = 'npm';
+  }
+
+  return {
+    run(...args: ReadonlyArray<string>): void {
+      spawn(npmCmd, [...globalOptions, 'run', ...args], options);
+    },
+    runOutput(...args: ReadonlyArray<string>): string {
+      return spawnOutput(npmCmd, [...globalOptions, 'run', ...args], options);
+    },
+    install(...args: ReadonlyArray<string>): void {
+      spawn(npmCmd, [...globalOptions, 'install', ...args], options);
+    },
+    ci(...args: ReadonlyArray<string>): void {
+      spawn(npmCmd, [...globalOptions, 'ci', ...args], options);
+    },
+    exec(...args: ReadonlyArray<string>): void {
+      spawn(npmCmd, [...globalOptions, 'exec', ...args], options);
+    },
+    version(...args: ReadonlyArray<string>): void {
+      spawn(npmCmd, [...globalOptions, 'version', ...args], options);
+    },
+    pack(...args: ReadonlyArray<string>): string {
+      return spawnOutput(npmCmd, [...globalOptions, 'pack', ...args], options);
+    },
+    diff(...args: ReadonlyArray<string>): string {
+      return spawnOutput(npmCmd, [...globalOptions, 'diff', ...args], options);
+    },
+    view(...args: ReadonlyArray<string>): string {
+      return spawnOutput(npmCmd, [...globalOptions, 'view', ...args], options);
+    },
+  };
+}
+
+interface GITOptions extends SpawnOptions {
+  quiet?: boolean;
+}
+
+export function git(options?: GITOptions) {
+  const cmdOptions = options?.quiet === true ? ['--quiet'] : [];
+  return {
+    add(...args: ReadonlyArray<string>): void {
+      spawn('git', ['add', ...cmdOptions, ...args], options);
+    },
+    commit(...args: ReadonlyArray<string>): void {
+      spawn('git', ['commit', ...cmdOptions, ...args], options);
+    },
+    clone(...args: ReadonlyArray<string>): void {
+      spawn('git', ['clone', ...cmdOptions, ...args], options);
+    },
+    checkout(...args: ReadonlyArray<string>): void {
+      spawn('git', ['checkout', ...cmdOptions, ...args], options);
+    },
+    fetch(...args: ReadonlyArray<string>): void {
+      spawn('git', ['fetch', ...cmdOptions, ...args], options);
+    },
+    status(...args: ReadonlyArray<string>): string {
+      return spawnOutput('git', ['status', ...cmdOptions, ...args], options);
+    },
+    revParse(...args: ReadonlyArray<string>): string {
+      return spawnOutput('git', ['rev-parse', ...cmdOptions, ...args], options);
+    },
+    revList(...args: ReadonlyArray<string>): Array<string> {
+      const allArgs = ['rev-list', ...cmdOptions, ...args];
+      const result = spawnOutput('git', allArgs, options);
+      return result === '' ? [] : result.split('\n');
+    },
+    tagExists(tag: string): boolean {
+      const result = childProcess.spawnSync(
+        'git',
+        ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`],
+        {
+          stdio: 'ignore',
+          ...options,
+        },
+      );
+      return result.status === 0;
+    },
+    catFile(...args: ReadonlyArray<string>): string {
+      return spawnOutput('git', ['cat-file', ...cmdOptions, ...args], options);
+    },
+    log(...args: ReadonlyArray<string>): string {
+      return spawnOutput('git', ['log', ...cmdOptions, ...args], options);
+    },
+  };
+}
+
+interface SpawnOptions {
+  cwd?: string;
+  env?: typeof process.env;
+  shell?: boolean;
+}
+
+function spawnOutput(
+  command: string,
+  args: ReadonlyArray<string>,
+  options?: SpawnOptions,
+): string {
+  const result = childProcess.spawnSync(command, args, {
+    maxBuffer: 10 * 1024 * 1024, // 10MB
+    stdio: ['inherit', 'pipe', 'inherit'],
+    encoding: 'utf-8',
+    ...options,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`Command failed: ${command} ${args.join(' ')}`);
+  }
+
+  return result.stdout.toString().trimEnd();
+}
+
+function spawn(
+  command: string,
+  args: ReadonlyArray<string>,
+  options?: SpawnOptions,
+): void {
+  const result = childProcess.spawnSync(command, args, {
+    stdio: 'inherit',
+    ...options,
+  });
+  if (result.status !== 0) {
+    throw new Error(`Command failed: ${command} ${args.join(' ')}`);
+  }
+}
+
+function* readdirRecursive(dirPath: string): Generator<{
+  name: string;
+  filepath: string;
+  stats: fs.Stats;
+}> {
+  for (const name of fs.readdirSync(dirPath)) {
+    const filepath = path.join(dirPath, name);
+    const stats = fs.lstatSync(filepath);
+
+    if (stats.isDirectory()) {
+      yield* readdirRecursive(filepath);
+    } else {
+      yield { name, filepath, stats };
+    }
+  }
+}
+
+export function showDirStats(dirPath: string): void {
+  const fileTypes: {
+    [filetype: string]: { filepaths: Array<string>; size: number };
+  } = {};
+  let totalSize = 0;
+
+  for (const { name, filepath, stats } of readdirRecursive(dirPath)) {
+    const ext = name.split('.').slice(1).join('.');
+    const filetype = ext ? '*.' + ext : name;
+
+    fileTypes[filetype] ??= { filepaths: [], size: 0 };
+
+    totalSize += stats.size;
+    fileTypes[filetype].size += stats.size;
+    fileTypes[filetype].filepaths.push(filepath);
+  }
+
+  const stats: Array<[string, number]> = [];
+  for (const [filetype, typeStats] of Object.entries(fileTypes)) {
+    const numFiles = typeStats.filepaths.length;
+
+    if (numFiles > 1) {
+      stats.push([filetype + ' x' + numFiles, typeStats.size]);
+    } else {
+      const relativePath = path.relative(dirPath, typeStats.filepaths[0]);
+      stats.push([relativePath, typeStats.size]);
+    }
+  }
+  stats.sort((a, b) => b[1] - a[1]);
+
+  const prettyStats = stats.map(([type, size]) => [
+    type,
+    (size / 1024).toFixed(2) + ' KB',
+  ]);
+
+  const typeMaxLength = Math.max(...prettyStats.map((x) => x[0].length));
+  const sizeMaxLength = Math.max(...prettyStats.map((x) => x[1].length));
+  for (const [type, size] of prettyStats) {
+    console.log(
+      type.padStart(typeMaxLength) + ' | ' + size.padStart(sizeMaxLength),
+    );
+  }
+
+  console.log('-'.repeat(typeMaxLength + 3 + sizeMaxLength));
+  const totalMB = (totalSize / 1024 / 1024).toFixed(2) + ' MB';
+  console.log(
+    'Total'.padStart(typeMaxLength) + ' | ' + totalMB.padStart(sizeMaxLength),
+  );
+}
+
+const prettierConfig = JSON.parse(
+  fs.readFileSync(localRepoPath('.prettierrc'), 'utf-8'),
+);
+
+export async function prettify(
+  filepath: string,
+  body: string,
+): Promise<string> {
+  return prettier.format(body, {
+    filepath,
+    ...prettierConfig,
+  });
+}
+
+export function writeGeneratedFile(filepath: string, body: string): void {
+  fs.mkdirSync(path.dirname(filepath), { recursive: true });
+  fs.writeFileSync(filepath, body);
+}
+
+export function buildCJSDevModeStub(
+  devModeSpecifier: string,
+  targetSpecifier: string,
+): string {
+  return [
+    `const { enableDevMode } = require('${devModeSpecifier}');`,
+    'enableDevMode();',
+    `module.exports = require('${targetSpecifier}');`,
+  ].join('\n');
+}
+
+export function buildESMDevModeStub(
+  devModeSpecifier: string,
+  targetSpecifier: string,
+): string {
+  return [
+    `import { enableDevMode } from '${devModeSpecifier}';`,
+    'enableDevMode();',
+    `export * from '${targetSpecifier}';`,
+  ].join('\n');
+}
+
+export function getReleaseDistTag(
+  version: string,
+  latestVersion: string,
+): string {
+  const { major, prerelease } = parseSemVer(version);
+  if (prerelease != null) {
+    return prerelease.split('.')[0];
+  }
+
+  return major >= parseSemVer(latestVersion).major
+    ? 'latest'
+    : `latest-${major}`;
+}
+
+export function isLatestReleaseVersion(
+  version: string,
+  latestVersion: string,
+): boolean {
+  const { major, prerelease } = parseSemVer(version);
+  return prerelease == null && major >= parseSemVer(latestVersion).major;
+}
+
+export function isPrereleaseVersion(version: string): boolean {
+  return parseSemVer(version).prerelease != null;
+}
+
+function parseSemVer(version: string): {
+  major: number;
+  prerelease: string | null;
+} {
+  const versionMatch =
+    /^(?<major>\d+)\.\d+\.\d+(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
+      version,
+    );
+  if (versionMatch?.groups == null) {
+    throw new Error('Version does not match semver spec: ' + version);
+  }
+
+  const { major, prerelease } = versionMatch.groups;
+  return {
+    major: Number(major),
+    prerelease: prerelease ?? null,
+  };
+}
+
+interface PackageJSON {
+  description: string;
+  version: string;
+  private?: boolean;
+  repository?: { url?: string };
+  scripts?: { [name: string]: string };
+  type?: string;
+  sideEffects?: false | Array<string>;
+  exports: ConditionalExports;
+  types?: string;
+  typesVersions: { [ranges: string]: { [path: string]: Array<string> } };
+  devDependencies?: { [name: string]: string };
+
+  // TODO: remove after we drop CJS support
+  main?: string;
+  module?: string;
+}
+
+export interface ConditionalExports {
+  [path: string]:
+    | string
+    | PlatformConditionalExports
+    | EnvironmentConditionalExports;
+}
+
+interface EnvironmentConditionalExports {
+  development: PlatformConditionalExports;
+  default: PlatformConditionalExports;
+}
+
+export interface PlatformConditionalExports {
+  module: string;
+  bun: string;
+  'module-sync': string;
+  node: string;
+  require: string;
+  default: string;
+}
+
+export function readPackageJSON(
+  dirPath: string = localRepoPath(),
+): PackageJSON {
+  const filepath = path.join(dirPath, 'package.json');
+  return JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+}
+
+export function readPackageJSONAtRef(ref: string): PackageJSON {
+  const packageJSONAtRef = git().catFile('blob', `${ref}:package.json`);
+  return JSON.parse(packageJSONAtRef);
+}
+
+export function readTSConfig(overrides?: any): ts.CompilerOptions {
+  const tsConfigPath = localRepoPath('tsconfig.json');
+
+  const { config: tsConfig, error: tsConfigError } =
+    ts.parseConfigFileTextToJson(
+      tsConfigPath,
+      fs.readFileSync(tsConfigPath, 'utf-8'),
+    );
+  assert(
+    tsConfigError === undefined,
+    'Fail to parse config: ' + JSON.stringify(tsConfigError),
+  );
+  assert(
+    tsConfig.compilerOptions !== undefined,
+    '"tsconfig.json" should have `compilerOptions`',
+  );
+
+  const { options: tsOptions, errors: tsOptionsErrors } =
+    ts.convertCompilerOptionsFromJson(
+      { ...tsConfig.compilerOptions, ...overrides },
+      process.cwd(),
+    );
+
+  assert(
+    tsOptionsErrors.length === 0,
+    'Fail to parse options: ' + JSON.stringify(tsOptionsErrors),
+  );
+
+  return tsOptions;
+}
